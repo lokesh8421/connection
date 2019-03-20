@@ -1,75 +1,36 @@
-
+import sys
 import time, string, pexpect, re
 import subprocess
 import logging
 
-class Connection(object):
-    """
-    Object built primarily for executing commands on Cisco IOS/NXOS devices.  The following
-    methods and variables are available for use in this class:
-
-        username         (opt) username credential (default 'admin')
-        password         (opt) password credential (default 'cisco')
-        enable_password  (opt) enable password credential (IOS only) (default 'cisco')
-        protocol         (opt) telnet/ssh option (default 'ssh')
-        port             (opt) port to connect on (if different from telnet/ssh default)
-        timeout          (opt) wait in seconds between each command (default 30)
-        prompt           (opt) prompt to expect after each command (default for IOS/NXOS)
-        log              (opt) logfile (default None)
-        verify           (opt) verify/enforce strictHostKey values for SSL (disabled by default)
-        searchwindowsize (opt) maximum amount of data used in matching expressions
-                               extremely important to set to a low value for large outputs
-                               pexpect default = None, setting this class default=256
-        force_wait       (opt) some OS ignore searchwindowsize and therefore still experience high
-                               CPU and long wait time for commands with large outputs to complete.
-                               A workaround is to sleep the script instead of running regex checking
-                               for prompt character.
-                               This should only be used in those unique scenarios...
-                               Default is 0 seconds (disabled).  If needed, set to 8 (seconds)
-
-        functions:
-        connect()        (opt) connect to device with provided protocol/port/hostname
-        login()          (opt) log into device with provided credentials
-        close()          (opt) close current connection
-        cmd()            execute a command on the device (provide matches and timeout)
-
-    Example using all defaults
-        c = Connection("host1")
-        c.cmd("terminal length 0")
-        c.cmd("show version")
-        print "version of code: %s" % c.output
-
-    @author agccie
-    @version 07/28/2014
-    """
-
-    def __init__(self, hostname):
-        self.hostname           = hostname
-        self.log                = None
-        self.username           = 'admin'
-        self.password           = 'cisco'
-        self.enable_password    = 'cisco'
-        self.protocol           = "ssh"
-        self.port               = None
-        self.timeout            = 30
-        self.prompt             = "[^#]#[ ]*$"
-        self.verify             = False
-        self.searchwindowsize   = 256
-        self.force_wait         = 0
-        self.child              = None
-        self.output             = ""        # output from last command
-        self._term_len          = 0         # terminal length for cisco devices
-        self._login             = False     # set to true at first successful login
-        self._log               = None      # private variable for tracking logfile state
+class Connection:
+    def __init__(self, host_name, user_name, password, connection_type):
+        self.hostname = host_name
+        self.username = user_name
+        self.password = password
+        self.log = None
+        self.timeout = 30
+        self.protocol = connection_type
+        self.force_wait = 0
+        self.prompt = "[^#]#[ ]*$"
+        self._login = False
+        self._log = None
+        self.s = None
+        self.verify = False
+        self.port = None
+        self._term_len = 0  # terminal length for cisco devices
+        self.searchwindowsize = 10000
+        self._login = False  # set to true at first successful login
+        self.output = ""  # output from last command
 
     def __connected(self):
         # determine if a connection is already open
-        connected = (self.child is not None and self.child.isatty())
+        connected = (self.s is not None and self.s.isatty())
         logging.debug("check for valid connection: %r" % connected)
         return connected
 
     @property
-    def term_len(self): return self._term_len 
+    def term_len(self): return self._term_len
 
     @term_len.setter
     def term_len(self, term_len):
@@ -102,7 +63,7 @@ class Connection(object):
 
     def connect(self):
         # close any currently open connections
-        self.close()
+        #self.close()
 
         # determine port if not explicitly set
         if self.port is None:
@@ -117,10 +78,12 @@ class Connection(object):
             if self.verify: no_verify = ""
             self.child = pexpect.spawn("ssh %s %s@%s -p %d" % (no_verify, self.username, self.hostname, self.port),
                 searchwindowsize = self.searchwindowsize)
+            self.child.setwinsize(1000,1000)
         elif self.protocol.lower() == "telnet":
             logging.info("spawning new pexpect connection: telnet %s %d" % (self.hostname, self.port))
             self.child = pexpect.spawn("telnet %s %d" % (self.hostname, self.port),
                 searchwindowsize = self.searchwindowsize)
+            self.child.setwinsize(1000, 1000)
         else:
             logging.error("unknown protocol %s" % self.protocol)
             raise Exception("Unsupported protocol: %s" % self.protocol)
@@ -236,7 +199,7 @@ class Connection(object):
         logging.error("failed to login after multiple attempts")
         return False
 
-    def cmd(self, command, **kargs):
+    def run_command(self, command, **kargs):
         """
         execute a command on a device and wait for one of the provided matches to return.
         Required argument string command
@@ -295,11 +258,52 @@ class Connection(object):
         # force wait option
         if self.force_wait != 0:
             time.sleep(self.force_wait)
-
+        print("Command   :%s" % command)
         result = self.__expect(matches, timeout)
+        #print("Man1 %s",self.child.before )
+        #print("Man2 %s", self.child.after)
+        #self.output = "%s%s" % (self.child.before, self.child.after)
         self.output = "%s%s" % (self.child.before, self.child.after)
-        if result == "eof" or result == "timeout":
-            logging.warning("unexpected %s occurred" % result)
-        return result
+        keep_list = []
+        for line in str.splitlines(self.output):
+              if line not in command:
+                  if (line.find("ps=1") == -1):
+                      keep_list.append(line)
+
+        #result = keep_list[-2]
+        keep_list = keep_list[:len(keep_list) - 2]
+        self.output = []
+        self.output = "\n".join(line.strip() for line in keep_list)
+        #result  = re.search("(0)", result)
+        #result  = re.search(r'\((.*)\)', result)
+        #print(result.group(0))
+        if sendline:
+            self.child.sendline("echo RESULT:$?")
+        else:
+            self.child.sendline("echo RESULT:$?")
+        result = self.__expect(matches, timeout)
+        result = re.search("RESULT:0", self.child.before)
+        if result:
+            return 0;
+        else:
+            return 255;
+        #return result
+
+    def copyFilesToDest(self, hostfile, destip, destuser, destPath, passwd):
+        # cmd = ("/usr/bin/scp "+ " -v " + \
+        #    " -o"," UserKnownHostsFile=/dev/null "+ \
+        #   " -o"," StrictHostKeyChecking=no "+ \
+        #    hostfile+\
+        #    " {}@{}:{}".format(destuser,destip,destPath))
+        timeout = 50000
+        cmd = "scp -r -o StrictHostKeyChecking=no {} {}@{}:{}".format(hostfile, destuser, destip, destPath)
+        obj = pexpect.spawn(cmd)
+
+        obj.logfile = sys.stdout
+        obj.expect('assword: ')
+        obj.sendline(passwd)
+        obj.expect('#', timeout)
+        #obj.expect(pexpect.EOF)
+        obj.close()
 
 
